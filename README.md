@@ -146,6 +146,66 @@ python extract_bbox_csv.py <output_folder>
 
 Creates `bounding_boxes.csv` with columns: `file`, `bbox_L`, `bbox_W`, `bbox_H`.
 
+## Shadow Generation
+
+Generate extruded "solid shadow" projections from agglomerate STL files. Three methods are available, from pixelated to perfectly smooth:
+
+### Voxel-Based Shadows (Original)
+
+Rasterizes the projected silhouette to a pixel grid and extrudes each pixel as a voxel. Fast but produces blocky/pixelated edges.
+
+```bash
+python generate_shadow_extrusion.py <input_stl_or_directory>
+```
+
+### Smooth Vector-Based Shadows
+
+Projects mesh triangles to 2D, computes the exact silhouette via polygon boolean union (shapely), and extrudes the result. Resolution-independent with smooth edges. Works with any STL file.
+
+```bash
+python generate_shadow_extrusion_smooth.py <input_stl_or_directory>
+```
+
+### Capsule-Projection Shadows (Best for Rod Agglomerates)
+
+Projects each rod analytically as a 2D rectangle (buffered LineString), unions all rectangles into a perfectly smooth silhouette, and extrudes using constrained Delaunay triangulation (Triangle library). Requires a batch output directory containing `metadata.json` (produced by `generate_batch.py`). This is the highest-quality method for rod-based agglomerates — holes between rods are preserved, and edges are mathematically exact with no rasterization artifacts.
+
+```bash
+python generate_shadow_capsule.py <batch_output_directory>
+```
+
+### Shadow Generation Options
+
+All shadow generators support:
+
+```
+-o, --output       Output directory (default: <input>_shadows/)
+-t, --thickness    Extrusion thickness in nm (default: 160)
+-s, --samples      Number of samples for min/max projection search (default: 200)
+-q, --quiet        Suppress progress output
+```
+
+Additional options for `generate_shadow_extrusion.py`:
+
+```
+-r, --resolution   Projection resolution for final output (default: 300)
+--method           voxel or contour (default: voxel)
+```
+
+Additional options for `generate_shadow_extrusion_smooth.py`:
+
+```
+-r, --resolution   Resolution for projection search (default: 300)
+```
+
+Additional options for `generate_shadow_capsule.py`:
+
+```
+-r, --resolution   Resolution for angle search rasterization only (default: 100)
+```
+
+Each generator produces min (smallest bounding box), max (largest bounding box), and random projections as binary STL files. Output shadows are flat in the XY plane, axis-aligned, and centered at the origin.
+
 ## Analysis Tools
 
 ### Analyze Batch
@@ -259,6 +319,9 @@ The test suite covers:
 - Python 3.8+
 - NumPy
 - Matplotlib (for analysis and plotting scripts)
+- Shapely (for smooth shadow generation — polygon boolean operations)
+- SciPy (for smooth shadow generation — Delaunay triangulation)
+- Triangle (for capsule shadow generation — constrained Delaunay triangulation)
 
 ### Development Dependencies
 

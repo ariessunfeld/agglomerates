@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "fluffy-clumps"
+name = "agglomerates"
 version = "0.1.0"
 description = "Generate 3D nanoparticle agglomerates via Brownian collision simulation"
 authors = ["Your Name <your.email@example.com>"]
@@ -24,6 +24,9 @@ classifiers = [
 python = "^3.8"
 numpy = "^1.20.0"
 matplotlib = "^3.5.0"
+shapely = "^2.0.0"
+scipy = "^1.9.0"
+triangle = ">=20220202"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.0"
@@ -42,3 +45,4 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
