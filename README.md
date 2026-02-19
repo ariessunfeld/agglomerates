@@ -322,6 +322,7 @@ The test suite covers:
 - Shapely (for smooth shadow generation — polygon boolean operations)
 - SciPy (for smooth shadow generation — Delaunay triangulation)
 - Triangle (for capsule shadow generation — constrained Delaunay triangulation)
+- Numba (JIT compilation for ~20x speedup of agglomerate generation; optional but strongly recommended — falls back to numpy-vectorized code if unavailable)
 
 ### Development Dependencies
 

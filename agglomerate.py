@@ -12,6 +12,21 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional
 import struct
 
+# Try to import numba for JIT-accelerated distance computation.
+# Falls back to numpy vectorized version if numba is unavailable.
+try:
+    from numba import njit
+    _HAS_NUMBA = True
+except ImportError:
+    _HAS_NUMBA = False
+    # Define a no-op decorator so @njit doesn't break
+    def njit(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def decorator(func):
+            return func
+        return decorator
+
 
 @dataclass
 class Nanorod:
@@ -266,6 +281,102 @@ def min_distance_to_agglomerate_fast(rod_center: np.ndarray, rod_direction: np.n
     return max(0.0, float(np.min(surface_dists)))
 
 
+# =============================================================================
+# Numba JIT-compiled distance computation (optional acceleration)
+# =============================================================================
+
+@njit(cache=True)
+def _jit_segment_segment_distance(p1, d1, len1, p2, d2, len2):
+    """Minimum distance between two line segments in 3D (JIT-compiled)."""
+    half1 = len1 / 2.0
+    half2 = len2 / 2.0
+
+    a1_0 = p1[0] - half1 * d1[0]
+    a1_1 = p1[1] - half1 * d1[1]
+    a1_2 = p1[2] - half1 * d1[2]
+    b1_0 = p1[0] + half1 * d1[0]
+    b1_1 = p1[1] + half1 * d1[1]
+    b1_2 = p1[2] + half1 * d1[2]
+
+    a2_0 = p2[0] - half2 * d2[0]
+    a2_1 = p2[1] - half2 * d2[1]
+    a2_2 = p2[2] - half2 * d2[2]
+    b2_0 = p2[0] + half2 * d2[0]
+    b2_1 = p2[1] + half2 * d2[1]
+    b2_2 = p2[2] + half2 * d2[2]
+
+    u0 = b1_0 - a1_0
+    u1 = b1_1 - a1_1
+    u2 = b1_2 - a1_2
+    v0 = b2_0 - a2_0
+    v1 = b2_1 - a2_1
+    v2 = b2_2 - a2_2
+    w0 = a1_0 - a2_0
+    w1 = a1_1 - a2_1
+    w2 = a1_2 - a2_2
+
+    a = u0*u0 + u1*u1 + u2*u2
+    b = u0*v0 + u1*v1 + u2*v2
+    c = v0*v0 + v1*v1 + v2*v2
+    d = u0*w0 + u1*w1 + u2*w2
+    e = v0*w0 + v1*w1 + v2*w2
+
+    D = a * c - b * b
+
+    if D < 1e-10:
+        s = 0.0
+        t = d / b if b > 1e-10 else 0.0
+    else:
+        s = (b * e - c * d) / D
+        t = (a * e - b * d) / D
+
+    if s < 0.0:
+        s = 0.0
+        t = e / c if c > 1e-10 else 0.0
+    elif s > 1.0:
+        s = 1.0
+        t = (e + b) / c if c > 1e-10 else 0.0
+
+    if t < 0.0:
+        t = 0.0
+        s = -d / a if a > 1e-10 else 0.0
+        if s < 0.0:
+            s = 0.0
+        elif s > 1.0:
+            s = 1.0
+    elif t > 1.0:
+        t = 1.0
+        s = (b - d) / a if a > 1e-10 else 0.0
+        if s < 0.0:
+            s = 0.0
+        elif s > 1.0:
+            s = 1.0
+
+    dx = a1_0 + s * u0 - (a2_0 + t * v0)
+    dy = a1_1 + s * u1 - (a2_1 + t * v1)
+    dz = a1_2 + s * u2 - (a2_2 + t * v2)
+    return np.sqrt(dx*dx + dy*dy + dz*dz)
+
+
+@njit(cache=True)
+def _jit_min_surface_distance(rod_center, rod_direction, length, diameter,
+                               agg_centers, agg_directions, n_rods):
+    """Minimum surface-to-surface distance from rod to agglomerate (JIT-compiled)."""
+    radius = diameter / 2.0
+    min_dist = 1e30
+    for i in range(n_rods):
+        centerline_dist = _jit_segment_segment_distance(
+            rod_center, rod_direction, length,
+            agg_centers[i], agg_directions[i], length
+        )
+        surface_dist = centerline_dist - radius - radius
+        if surface_dist < min_dist:
+            min_dist = surface_dist
+    if min_dist < 0.0:
+        return 0.0
+    return min_dist
+
+
 def check_collision(rod: Nanorod, agglomerate: List[Nanorod], tolerance: float = 1e-6) -> bool:
     """Check if rod collides with any rod in the agglomerate."""
     return min_distance_to_agglomerate(rod, agglomerate) <= tolerance
@@ -425,12 +536,18 @@ def generate_agglomerate(num_particles: int, length: float, diameter: float,
             attempts += 1
             total_attempts += 1
 
-            # Calculate minimum distance to agglomerate (vectorized)
-            d_min = min_distance_to_agglomerate_fast(
-                new_center, new_direction, length, diameter,
-                agg_centers[:particles_added], agg_directions[:particles_added],
-                length, diameter
-            )
+            # Calculate minimum distance to agglomerate
+            if _HAS_NUMBA:
+                d_min = _jit_min_surface_distance(
+                    new_center, new_direction, length, diameter,
+                    agg_centers, agg_directions, particles_added
+                )
+            else:
+                d_min = min_distance_to_agglomerate_fast(
+                    new_center, new_direction, length, diameter,
+                    agg_centers[:particles_added], agg_directions[:particles_added],
+                    length, diameter
+                )
 
             # Check for collision
             if d_min <= 0:
