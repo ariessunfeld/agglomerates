@@ -138,6 +138,134 @@ def min_distance_to_agglomerate(rod: Nanorod, agglomerate: List[Nanorod]) -> flo
     return max(0, min_dist)
 
 
+def vectorized_segment_distances(p1: np.ndarray, d1: np.ndarray, len1: float,
+                                  p2_arr: np.ndarray, d2_arr: np.ndarray, len2: float) -> np.ndarray:
+    """
+    Calculate minimum distances from one line segment to N line segments.
+
+    Vectorized version of segment_segment_distance that processes all
+    agglomerate rods simultaneously using numpy array operations.
+
+    Args:
+        p1: (3,) Center of query segment
+        d1: (3,) Direction unit vector of query segment
+        len1: Length of query segment
+        p2_arr: (N, 3) Centers of target segments
+        d2_arr: (N, 3) Direction unit vectors of target segments
+        len2: Length of target segments (same for all)
+
+    Returns:
+        (N,) array of minimum distances between query and each target segment
+    """
+    N = len(p2_arr)
+
+    # Endpoints of query segment (fixed for all comparisons)
+    a1 = p1 - (len1 / 2) * d1  # (3,)
+    b1 = p1 + (len1 / 2) * d1  # (3,)
+
+    # Endpoints of all target segments
+    half2 = len2 / 2
+    a2 = p2_arr - half2 * d2_arr  # (N, 3)
+    b2 = p2_arr + half2 * d2_arr  # (N, 3)
+
+    # Direction vectors
+    u = b1 - a1  # (3,)
+    v = b2 - a2  # (N, 3)
+    w = a1 - a2  # (N, 3) via broadcast
+
+    # Dot products — use explicit element-wise ops to match scalar np.dot exactly
+    a = u[0]*u[0] + u[1]*u[1] + u[2]*u[2]                     # scalar
+    b_arr = v[:, 0]*u[0] + v[:, 1]*u[1] + v[:, 2]*u[2]        # (N,)
+    c_arr = v[:, 0]*v[:, 0] + v[:, 1]*v[:, 1] + v[:, 2]*v[:, 2]  # (N,)
+    d_arr = w[:, 0]*u[0] + w[:, 1]*u[1] + w[:, 2]*u[2]        # (N,)
+    e_arr = v[:, 0]*w[:, 0] + v[:, 1]*w[:, 1] + v[:, 2]*w[:, 2]  # (N,)
+
+    D = a * c_arr - b_arr * b_arr  # (N,)
+
+    # Step 1: Initial s, t (unconstrained solution)
+    parallel = D < 1e-10
+    nonpar = ~parallel
+
+    s = np.zeros(N)
+    t = np.zeros(N)
+
+    if np.any(nonpar):
+        D_safe = np.where(nonpar, D, 1.0)  # avoid division by zero
+        s = np.where(nonpar, (b_arr * e_arr - c_arr * d_arr) / D_safe, 0.0)
+        t = np.where(nonpar, (a * e_arr - b_arr * d_arr) / D_safe, 0.0)
+
+    # Parallel case: s=0, t = d/b if |b| > 1e-10 else 0
+    par_bvalid = parallel & (np.abs(b_arr) > 1e-10)
+    b_safe = np.where(par_bvalid, b_arr, 1.0)
+    t = np.where(par_bvalid, d_arr / b_safe, t)
+
+    # Step 2: Clamp s to [0, 1] and recalculate t
+    c_valid = c_arr > 1e-10
+    c_safe = np.where(c_valid, c_arr, 1.0)
+
+    s_neg = s < 0
+    s = np.where(s_neg, 0.0, s)
+    t = np.where(s_neg & c_valid, e_arr / c_safe, t)
+    t = np.where(s_neg & ~c_valid, 0.0, t)
+
+    s_big = s > 1
+    s = np.where(s_big, 1.0, s)
+    t = np.where(s_big & c_valid, (e_arr + b_arr) / c_safe, t)
+    t = np.where(s_big & ~c_valid, 0.0, t)
+
+    # Step 3: Clamp t to [0, 1] and recalculate s (with final clamp)
+    t_neg = t < 0
+    t = np.where(t_neg, 0.0, t)
+    if a > 1e-10:
+        s = np.where(t_neg, np.clip(-d_arr / a, 0.0, 1.0), s)
+    else:
+        s = np.where(t_neg, 0.0, s)
+
+    t_big = t > 1
+    t = np.where(t_big, 1.0, t)
+    if a > 1e-10:
+        s = np.where(t_big, np.clip((b_arr - d_arr) / a, 0.0, 1.0), s)
+    else:
+        s = np.where(t_big, 0.0, s)
+
+    # Closest points and distances
+    closest1 = a1 + np.outer(s, u)         # (N, 3)
+    closest2 = a2 + t[:, np.newaxis] * v   # (N, 3)
+
+    diff = closest1 - closest2
+    distances = np.sqrt(diff[:, 0]**2 + diff[:, 1]**2 + diff[:, 2]**2)  # (N,)
+
+    return distances
+
+
+def min_distance_to_agglomerate_fast(rod_center: np.ndarray, rod_direction: np.ndarray,
+                                      rod_length: float, rod_diameter: float,
+                                      agg_centers: np.ndarray, agg_directions: np.ndarray,
+                                      agg_length: float, agg_diameter: float) -> float:
+    """
+    Vectorized minimum surface-to-surface distance from a rod to the agglomerate.
+
+    Args:
+        rod_center: (3,) center of query rod
+        rod_direction: (3,) direction of query rod
+        rod_length: length of query rod
+        rod_diameter: diameter of query rod
+        agg_centers: (N, 3) centers of agglomerate rods
+        agg_directions: (N, 3) directions of agglomerate rods
+        agg_length: length of agglomerate rods (uniform)
+        agg_diameter: diameter of agglomerate rods (uniform)
+
+    Returns:
+        Minimum surface-to-surface distance (clamped to >= 0)
+    """
+    centerline_dists = vectorized_segment_distances(
+        rod_center, rod_direction, rod_length,
+        agg_centers, agg_directions, agg_length
+    )
+    surface_dists = centerline_dists - (rod_diameter / 2) - (agg_diameter / 2)
+    return max(0.0, float(np.min(surface_dists)))
+
+
 def check_collision(rod: Nanorod, agglomerate: List[Nanorod], tolerance: float = 1e-6) -> bool:
     """Check if rod collides with any rod in the agglomerate."""
     return min_distance_to_agglomerate(rod, agglomerate) <= tolerance
@@ -261,11 +389,19 @@ def generate_agglomerate(num_particles: int, length: float, diameter: float,
     # Initialize with first particle at origin
     initial_rod = Nanorod(
         center=np.zeros(3),
-        direction=np.array([0, 0, 1]),  # Initial rod along z-axis
+        direction=np.array([0, 0, 1], dtype=float),  # Initial rod along z-axis
         length=length,
         diameter=diameter
     )
     agglomerate = [initial_rod]
+
+    # Pre-allocate arrays for vectorized distance computation
+    agg_centers = np.empty((num_particles, 3))
+    agg_directions = np.empty((num_particles, 3))
+    agg_centers[0] = initial_rod.center
+    agg_directions[0] = initial_rod.direction
+    # Running sum for incremental center-of-mass
+    com_sum = initial_rod.center.copy()
 
     if verbose:
         print(f"Starting agglomerate generation with {num_particles} particles")
@@ -276,30 +412,39 @@ def generate_agglomerate(num_particles: int, length: float, diameter: float,
     max_attempts_per_particle = 100000
 
     while particles_added < num_particles:
-        # Calculate current center of mass and R_out
-        com = calculate_agglomerate_com(agglomerate)
-        r_out = r_out_factor * length * (1 + 0.1 * len(agglomerate))  # Grow with agglomerate
+        # Calculate current center of mass and R_out incrementally
+        com = com_sum / particles_added
+        r_out = r_out_factor * length * (1 + 0.1 * particles_added)  # Grow with agglomerate
 
         # Create new particle at random position on R_out sphere
-        new_rod = Nanorod(
-            center=random_point_on_sphere(com, r_out),
-            direction=random_unit_vector(),
-            length=length,
-            diameter=diameter
-        )
+        new_center = random_point_on_sphere(com, r_out)
+        new_direction = random_unit_vector()
 
         attempts = 0
         while attempts < max_attempts_per_particle:
             attempts += 1
             total_attempts += 1
 
-            # Calculate minimum distance to agglomerate
-            d_min = min_distance_to_agglomerate(new_rod, agglomerate)
+            # Calculate minimum distance to agglomerate (vectorized)
+            d_min = min_distance_to_agglomerate_fast(
+                new_center, new_direction, length, diameter,
+                agg_centers[:particles_added], agg_directions[:particles_added],
+                length, diameter
+            )
 
             # Check for collision
             if d_min <= 0:
                 # Collision! Add to agglomerate
-                agglomerate.append(new_rod.copy())
+                new_rod = Nanorod(
+                    center=new_center.copy(),
+                    direction=new_direction.copy(),
+                    length=length,
+                    diameter=diameter
+                )
+                agglomerate.append(new_rod)
+                agg_centers[particles_added] = new_center
+                agg_directions[particles_added] = new_direction
+                com_sum += new_center
                 particles_added += 1
                 if verbose:
                     print(f"  Particle {particles_added}/{num_particles} added after {attempts} steps")
@@ -307,12 +452,12 @@ def generate_agglomerate(num_particles: int, length: float, diameter: float,
 
             # Move particle by d_min in random direction
             move_direction = random_unit_vector()
-            new_rod.center = new_rod.center + d_min * move_direction
+            new_center = new_center + d_min * move_direction
             # Also randomly rotate the rod
-            new_rod.direction = random_unit_vector()
+            new_direction = random_unit_vector()
 
             # Check if particle left the R_out sphere
-            dist_from_com = np.linalg.norm(new_rod.center - com)
+            dist_from_com = np.linalg.norm(new_center - com)
 
             if dist_from_com > r_out:
                 # Calculate escape probability
@@ -321,16 +466,12 @@ def generate_agglomerate(num_particles: int, length: float, diameter: float,
                 # Random test for escape
                 if np.random.random() < p_esc:
                     # Particle escapes - start with new particle
-                    new_rod = Nanorod(
-                        center=random_point_on_sphere(com, r_out),
-                        direction=random_unit_vector(),
-                        length=length,
-                        diameter=diameter
-                    )
+                    new_center = random_point_on_sphere(com, r_out)
+                    new_direction = random_unit_vector()
                 else:
                     # Redirect particle back to sphere
-                    new_rod.center = redirect_to_sphere(new_rod.center, com, r_out, p_esc)
-                    new_rod.direction = random_unit_vector()
+                    new_center = redirect_to_sphere(new_center, com, r_out, p_esc)
+                    new_direction = random_unit_vector()
 
         if attempts >= max_attempts_per_particle:
             if verbose:
